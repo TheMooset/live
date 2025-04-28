@@ -1,0 +1,62 @@
+######################## vars ########################
+variables:
+  PROJECT_NAME: "live-shopping"
+
+######################## stages ########################
+stages:
+- deploy-pack-dev
+- buildx-build
+
+######################## build ########################
+.build-docker:
+  stage: buildx-build
+  script:
+    - docker login ${DOCKER_REGISTRY_MIRROR} -u ${DOCKER_REGISTRY_USER} -p ${DOCKER_REGISTRY_PASS}
+    - DOCKER_BUILDKIT=1 docker buildx build . --push --cache-from=type=local,ref=${PROJECT_NAME},src=`pwd`/cache --cache-to=type=local,ref=${PROJECT_NAME},mode=max,dest=`pwd`/cache -t ${IMAGE_NAME}:${IMAGE_TAG} -t ${IMAGE_NAME}:latest --output=type=image,push=true --builder builder-1
+  cache:
+    key: ${CI_PROJECT_ID}
+    paths:
+      - cache/
+  tags:
+    - buildx
+
+######################## staging ########################
+build docker image dev:
+  extends: .build-docker
+  except:
+    - master
+    - tags
+  when: manual
+  variables:
+    IMAGE_NAME: ${DOCKER_REGISTRY_MIRROR}/basalam/${PROJECT_NAME}/dev
+    IMAGE_TAG: ${CI_COMMIT_BRANCH}-${CI_COMMIT_SHORT_SHA}-${CI_PIPELINE_ID}
+
+######################## production ########################
+build docker image master:
+  extends: .build-docker
+  only:
+    - tags
+  variables:
+    IMAGE_NAME: ${DOCKER_REGISTRY_MIRROR}/basalam/${PROJECT_NAME}/master
+    IMAGE_TAG: ${CI_COMMIT_TAG}
+  before_script:
+    - bash -c "if [[ ${CI_COMMIT_TAG} =~ ${SEMVER_REGEX} ]]; then exit 0; else exit 1; fi"
+
+######################## deploy pack dev ########################
+deploy-pack-dev:
+  when: manual
+  stage: deploy-pack-dev
+  image:
+      name: docker.basalam.dev/basalam/docker:20.10.7-custom
+      entrypoint: [""]
+  variables:
+      IMAGE_NAME_DEV: ${DOCKER_REGISTRY_MIRROR}/basalam/${PROJECT_NAME}/dev
+      IMAGE_NAME_MASTER: ${DOCKER_REGISTRY_MIRROR}/basalam/${PROJECT_NAME}/master
+      IMAGE_TAG: ${CI_COMMIT_BRANCH}-${CI_COMMIT_SHORT_SHA}-${CI_PIPELINE_ID}
+  script:
+      - |
+        if [ -z "${CI_COMMIT_TAG}" ]; then
+        curl --request POST --header 'Content-Type: application/json' --url https://kdp-api.basalam.dev/v1/deploy/dev --header "secret-key: ${KDP_SECRET_KEY}" --data "{\"project_name\":\"${PROJECT_NAME}\",\"image_name_tag\":\"${IMAGE_NAME_DEV}:${IMAGE_TAG}\"}"
+        else
+        curl --request POST --header 'Content-Type: application/json' --url https://kdp-api.basalam.dev/v1/deploy/dev --header "secret-key: ${KDP_SECRET_KEY}" --data "{\"project_name\":\"${PROJECT_NAME}\",\"image_name_tag\":\"${IMAGE_NAME_MASTER}:${CI_COMMIT_TAG}\"}"
+        fi
